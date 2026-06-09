@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>streem — watch together</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+</head>
+<body>
+  <!-- Join screen -->
+  <div id="join" class="join">
+    <div class="join-card">
+      <div class="logo">🎬 streem</div>
+      <p class="tagline">Voice chat · 60fps screen share · text chat. Just like movie night.</p>
+      <label>Your name</label>
+      <input id="nameInput" maxlength="32" placeholder="e.g. Alex" autocomplete="off" />
+      <label>Room code</label>
+      <input id="roomInput" maxlength="64" placeholder="e.g. movie-night" autocomplete="off" />
+      <button id="joinBtn">Join room</button>
+      <p class="hint">Share the room code with friends so they land in the same room. Use a mic + headphones for the best audio.</p>
+    </div>
+  </div>
+
+  <!-- Main app -->
+  <div id="app" class="app hidden">
+    <!-- Left: participants -->
+    <aside class="sidebar">
+      <div class="room-head">
+        <div class="room-name" id="roomLabel">room</div>
+        <div class="room-sub">In this room</div>
+      </div>
+      <ul id="participants" class="participants"></ul>
+      <div class="sidebar-foot">streem · p2p webrtc</div>
+    </aside>
+
+    <!-- Center: the screen-share stage -->
+    <main class="stage-wrap">
+      <div id="stage" class="stage">
+        <video id="stageVideo" autoplay playsinline muted class="hidden"></video>
+        <div id="stagePlaceholder" class="stage-placeholder">
+          <div class="big">📺</div>
+          <div>No one is sharing yet.</div>
+          <div class="muted">Click <b>Share screen</b> to start the movie.</div>
+        </div>
+        <div id="presenterTag" class="presenter-tag hidden"></div>
+      </div>
+
+      <!-- Control bar -->
+      <div class="controls">
+        <button id="micBtn" class="ctl" title="Mute / unmute mic">🎤<span>Mute</span></button>
+        <button id="shareBtn" class="ctl primary" title="Share your screen">🖥️<span>Share screen</span></button>
+        <button id="fsBtn" class="ctl" title="Fullscreen the stage">⛶<span>Fullscreen</span></button>
+        <button id="leaveBtn" class="ctl danger" title="Leave the room">⏏<span>Leave</span></button>
+      </div>
+    </main>
+
+    <!-- Right: text chat -->
+    <section class="chat">
+      <div class="chat-head">Chat</div>
+      <div id="messages" class="messages"></div>
+      <form id="chatForm" class="chat-form">
+        <input id="chatInput" placeholder="Message…" maxlength="2000" autocomplete="off" />
+        <button type="submit">Send</button>
+      </form>
+    </section>
+  </div>
+
+  <!-- hidden audio elements for remote peers get injected here -->
+  <div id="audioSink" style="display:none"></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="client.js"></script>
+</body>
+</html>

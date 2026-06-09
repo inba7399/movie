@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: streem
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: 22.20.0
+      # Optional: plug in your own TURN server for reliable connections behind
+      # strict firewalls. Leave unset to use the free public fallback.
+      # - key: TURN_URL
+      #   value: turn:your-turn-host:3478
+      # - key: TURN_USERNAME
+      #   value: youruser
+      # - key: TURN_CREDENTIAL
+      #   value: yoursecret
