@@ -44,12 +44,22 @@
           <div class="muted">Click <b>Share screen</b> to start the movie.</div>
         </div>
         <div id="presenterTag" class="presenter-tag hidden"></div>
+        <div id="statsHud" class="stats-hud hidden"></div>
       </div>
 
       <!-- Control bar -->
       <div class="controls">
         <button id="micBtn" class="ctl" title="Mute / unmute mic">🎤<span>Mute</span></button>
         <button id="shareBtn" class="ctl primary" title="Share your screen">🖥️<span>Share screen</span></button>
+        <button id="optBtn" class="ctl hidden" title="Optimize for: Smooth (video) or Sharp (text/apps)">✨<span>Smooth</span></button>
+        <select id="qualitySelect" class="ctl quality hidden" title="Stream quality you receive">
+          <option value="auto">⚙️ Auto</option>
+          <option value="2160">4K</option>
+          <option value="1440">1440p</option>
+          <option value="1080">1080p</option>
+          <option value="720">720p</option>
+          <option value="480">480p</option>
+        </select>
         <button id="fsBtn" class="ctl" title="Fullscreen the stage">⛶<span>Fullscreen</span></button>
         <button id="leaveBtn" class="ctl danger" title="Leave the room">⏏<span>Leave</span></button>
       </div>

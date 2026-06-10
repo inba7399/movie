@@ -149,6 +149,17 @@ body {
   display: flex; align-items: center; gap: 6px;
 }
 .presenter-tag::before { content: "🔴"; font-size: 10px; }
+.stats-hud {
+  position: absolute;
+  bottom: 12px; left: 12px;
+  background: rgba(0,0,0,.55);
+  padding: 4px 10px;
+  border-radius: 14px;
+  font-size: 11px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color: var(--muted);
+  pointer-events: none;
+}
 
 /* Controls */
 .controls {
@@ -178,6 +189,8 @@ body {
 .ctl.primary.active { background: var(--green); border-color: var(--green); }
 .ctl.danger:hover { background: var(--red); border-color: var(--red); color: #fff; }
 .ctl.muted-on { background: var(--red); border-color: var(--red); color: #fff; }
+select.ctl { appearance: none; -webkit-appearance: none; -moz-appearance: none; padding-right: 16px; }
+select.ctl option { background: var(--panel-2); color: var(--text); }
 
 /* Chat */
 .chat {
