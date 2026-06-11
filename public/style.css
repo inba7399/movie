@@ -191,6 +191,9 @@ body {
 .ctl.muted-on { background: var(--red); border-color: var(--red); color: #fff; }
 select.ctl { appearance: none; -webkit-appearance: none; -moz-appearance: none; padding-right: 16px; }
 select.ctl option { background: var(--panel-2); color: var(--text); }
+.ctl.vol { gap: 10px; cursor: default; }
+.ctl.vol input[type="range"] { width: 110px; accent-color: var(--accent); }
+.ctl.vol #volPct { font-variant-numeric: tabular-nums; min-width: 38px; text-align: right; color: var(--muted); font-size: 12px; }
 
 /* Chat */
 .chat {

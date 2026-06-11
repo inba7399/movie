@@ -32,16 +32,20 @@ let micEnabled = true;
 // Viewer-selectable quality. Each viewer has its OWN connection to the presenter, so
 // the presenter can encode a different quality per viewer — true per-viewer quality with
 // no media server. Picking a level signals the presenter, who scales their captured
-// screen DOWN to that level on this one connection. (Screen capture caps at ~60fps.)
-// Bitrates sized for real home uplinks (Twitch streams 1080p60 at ~6 Mbps) — asking
-// for more than the line can carry is itself a cause of stutter.
+// screen DOWN to that level on this one connection.
+// Bitrates sized for real home uplinks (asking for more than the line can carry is itself
+// a cause of stutter). Lower rungs cap framerate so a struggling viewer drops fluidity
+// LAST — going from 60 to 30 fps is far more visible than a small resolution dip.
+// Top rungs target 120 fps: the user explicitly wants 120fps where the screen supports it.
+// What you actually get is min(monitor refresh, content fps, encoder capability, BWE) —
+// asking for 120 unlocks the ceiling; below that the browser auto-paces.
 const QUALITY_PRESETS = {
-  auto:   { label: 'Auto',  maxBitrate: null,       height: null, maxFramerate: 60 },
-  '2160': { label: '4K',    maxBitrate: 24_000_000, height: 2160, maxFramerate: 60 },
-  '1440': { label: '1440p', maxBitrate: 12_000_000, height: 1440, maxFramerate: 60 },
-  '1080': { label: '1080p', maxBitrate:  8_000_000, height: 1080, maxFramerate: 60 },
-  '720':  { label: '720p',  maxBitrate:  4_500_000, height: 720,  maxFramerate: 60 },
-  '480':  { label: '480p',  maxBitrate:  1_500_000, height: 480,  maxFramerate: 30 },
+  auto:   { label: 'Auto',  maxBitrate: null,       height: null, maxFramerate: 120 },
+  '2160': { label: '4K',    maxBitrate: 28_000_000, height: 2160, maxFramerate: 60  },
+  '1440': { label: '1440p', maxBitrate: 16_000_000, height: 1440, maxFramerate: 120 },
+  '1080': { label: '1080p', maxBitrate: 10_000_000, height: 1080, maxFramerate: 120 },
+  '720':  { label: '720p',  maxBitrate:  5_500_000, height: 720,  maxFramerate: 120 },
+  '480':  { label: '480p',  maxBitrate:  1_500_000, height: 480,  maxFramerate: 60  },
 };
 // In a mesh every viewer gets their OWN encode — N viewers means N uploads at once.
 // Split a total uplink budget across them so 4 friends don't ask a home connection
@@ -206,6 +210,8 @@ function createPeer(peerId, name) {
     preferVideoCodec(pc); // codec choice depends on Sharp/Smooth mode
     // a new viewer changes the per-viewer uplink budget — rebalance everyone
     for (const [, s] of peers) tuneVideoSender(s);
+    // tell this new viewer which incoming stream is the movie soundtrack
+    socket.emit('signal', { to: peerId, data: { movieStreamId: screenStream.id } });
   }
 
   pc.onicecandidate = ({ candidate }) => {
@@ -224,7 +230,7 @@ function createPeer(peerId, name) {
     }
   };
 
-  pc.ontrack = ({ track, receiver }) => {
+  pc.ontrack = ({ track, receiver, streams }) => {
     if (track.kind === 'video') {
       // Start with a SMALL receive buffer (low glass-to-glass delay). The adaptive
       // loop below grows it only when playback actually hitches, then shrinks back.
@@ -246,10 +252,24 @@ function createPeer(peerId, name) {
       };
       track.onended = () => { clearTimeout(muteTimer); clearPresenter(peerId); };
     } else {
-      // mic audio and/or shared-movie audio — play through a per-peer element
-      state.audioStream.addTrack(track);
-      attachAudio(peerId, state.audioStream);
-      track.onended = () => { try { state.audioStream.removeTrack(track); } catch (_) {} };
+      // Audio routing: VOICE vs MOVIE-SOUND are mixed in one peer connection. We tell
+      // them apart by MediaStream id — the presenter signals its screenStream.id, and
+      // any incoming audio track that arrives with that stream id is the movie. The
+      // movie path is routed through a Web Audio GainNode so we can boost it well past
+      // an <audio> element's 0..1 volume cap — that's how Discord makes "stream audio"
+      // sound loud while voice stays at a sane level.
+      const streamIds = (streams || []).map((s) => s.id);
+      const isMovie = streamIds.some((id) => id === state.movieStreamId);
+      if (isMovie) {
+        attachMovieAudio(peerId, track);
+      } else {
+        state.audioStream.addTrack(track);
+        attachVoiceAudio(peerId, state.audioStream);
+      }
+      track.onended = () => {
+        if (isMovie) detachMovieAudio(peerId, track);
+        else { try { state.audioStream.removeTrack(track); } catch (_) {} }
+      };
     }
   };
 
@@ -273,6 +293,13 @@ function createPeer(peerId, name) {
 async function handleSignal(from, data) {
   // A viewer is asking us (the presenter) for a quality level on their connection.
   if (data && data.quality) { applyQualityRequest(from, data.quality); return; }
+  // The presenter is telling us which MediaStream id carries their movie audio
+  // (so we know which incoming audio track to route through the boosted gain).
+  if (data && data.movieStreamId !== undefined) {
+    const st = peers.get(from);
+    if (st) st.movieStreamId = data.movieStreamId || null;
+    return;
+  }
 
   let state = peers.get(from);
   if (!state) state = createPeer(from, 'Guest'); // signal raced ahead of peer-joined
@@ -312,8 +339,9 @@ function removePeer(peerId) {
     if (sharing && screenStream) for (const [, s] of peers) tuneVideoSender(s);
   }
   clearPresenter(peerId);
-  const audio = $('audio-' + peerId);
-  if (audio) audio.remove();
+  detachMovieAudio(peerId);
+  const voice = $('voice-' + peerId);
+  if (voice) voice.remove();
   const li = $('p-' + peerId);
   if (li) li.remove();
 }
@@ -357,10 +385,13 @@ async function startShare() {
   }
 
   // push the screen onto every existing connection
-  for (const [, state] of peers) {
+  for (const [peerId, state] of peers) {
     for (const track of stream.getTracks()) state.pc.addTrack(track, stream);
     preferVideoCodec(state.pc); // H264 hw for movies, VP9 for sharp text
     tuneVideoSender(state);
+    // tell each viewer which incoming MediaStream id is the movie soundtrack —
+    // they'll route its audio through the boosted Web Audio path
+    socket.emit('signal', { to: peerId, data: { movieStreamId: stream.id } });
   }
 
   showPresenter('self', stream, myName + ' (You)');
@@ -384,6 +415,8 @@ function stopShare() {
 
   clearPresenter('self');
   socket.emit('presence', { sharing: false });
+  // viewers can stop tagging future audio as "movie"
+  for (const [peerId] of peers) socket.emit('signal', { to: peerId, data: { movieStreamId: null } });
   updateShareBtn();
 }
 
@@ -399,7 +432,7 @@ function applyEncoding(sender, preset) {
   // BWE still adapts below it, but no single viewer can starve the others.
   const meshShare = Math.max(1_500_000, Math.floor(UPLINK_BUDGET / Math.max(1, peers.size)));
   enc.maxBitrate = preset.maxBitrate ? Math.min(preset.maxBitrate, meshShare) : meshShare;
-  enc.maxFramerate = preset.maxFramerate || 60;
+  enc.maxFramerate = preset.maxFramerate || 120;
   const capH = (sender.track.getSettings && sender.track.getSettings().height) || 1080;
   enc.scaleResolutionDownBy = preset.height ? Math.max(1, capH / preset.height) : 1;
   // Sharp mode keeps resolution (crisp text); smooth mode keeps framerate (fluid video).
@@ -416,7 +449,7 @@ function effectivePreset(requestKey) {
   return {
     maxBitrate: lower(req.maxBitrate, ceil.maxBitrate),
     height: lower(req.height, ceil.height),
-    maxFramerate: Math.min(req.maxFramerate || 60, ceil.maxFramerate || 60),
+    maxFramerate: Math.min(req.maxFramerate || 120, ceil.maxFramerate || 120),
   };
 }
 
@@ -444,17 +477,19 @@ function setBroadcastQuality(qualityKey) {
 }
 
 // Capture constraints sized to what we'll actually send: cap resolution to the chosen
-// broadcast quality (default 1080p — 4K only if explicitly picked) and use 30fps for text,
-// 60fps for video. Over-capturing (e.g. 4K60) is the main cause of stutter on one machine.
+// broadcast quality (default 1080p — 4K only if explicitly picked).
+// Framerate target: 120fps in motion mode (user wants high-refresh-rate movie/game
+// content); 30fps in detail mode (text/apps don't update faster). The browser hands
+// back min(monitor refresh, content fps) — asking for 120 just unlocks the ceiling.
+// Over-capturing IS the main cause of stutter on one machine, so when the encoder
+// reports CPU overload we ratchet capture back down (cpuRelief recovers on its own).
 function captureConstraints() {
   const capHeight = { '2160': 2160, '1440': 1440, '1080': 1080, '720': 720, '480': 480 };
   let height = capHeight[broadcastQuality] || 1080;
-  let fps = contentMode === 'motion' ? 60 : 30;
-  // If the encoder reported sustained CPU overload, capture less — a steady 30fps
-  // beats a stuttering 60fps every time. (cpuRelief recovers on its own when clean.)
-  if (cpuRelief >= 1) fps = 30;
-  if (cpuRelief >= 2) height = Math.min(height, 720);
-  return { height: { ideal: height }, frameRate: { ideal: fps } };
+  let fps = contentMode === 'motion' ? 120 : 30;
+  if (cpuRelief >= 1) fps = Math.min(fps, 60);
+  if (cpuRelief >= 2) { fps = Math.min(fps, 30); height = Math.min(height, 720); }
+  return { height: { ideal: height }, frameRate: { ideal: fps, max: fps } };
 }
 
 // Re-apply capture constraints to a live share (after a quality/mode change).
@@ -752,23 +787,97 @@ qualitySelect.addEventListener('change', () => {
 });
 
 // ---------- Audio (remote voices + movie sound) ----------
-function attachAudio(peerId, stream) {
-  let audio = $('audio-' + peerId);
+// Two parallel pipelines:
+//   VOICE  → <audio> element (one per peer, holds that peer's mic). Default volume 1.0,
+//            echo cancellation already applied at the mic source.
+//   MOVIE  → Web Audio graph: MediaStreamAudioSourceNode → per-peer GainNode →
+//            master movieGain → destination. We can boost above 1.0 (HTMLMediaElement.volume
+//            cannot — that's why the movie sounded quiet next to the mic).
+// Identifying which incoming audio track is which: the presenter signals its
+// screenStream.id ahead of time, and ontrack matches on the receiver side.
+let audioCtx = null;
+let movieGain = null;
+let movieVolume = 1.6; // default boost — Discord-style "louder than 100%"
+const movieNodes = new Map(); // peerId -> { source, gain, track, kickerAudio }
+
+function ensureAudioCtx() {
+  if (audioCtx) return audioCtx;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  movieGain = audioCtx.createGain();
+  movieGain.gain.value = movieVolume;
+  movieGain.connect(audioCtx.destination);
+  // Autoplay: an AudioContext created before user interaction starts SUSPENDED. Kick
+  // it on the first click — and try once now in case the click already happened.
+  const resume = () => { audioCtx.resume().catch(() => {}); };
+  resume();
+  document.addEventListener('pointerdown', resume, { once: false });
+  return audioCtx;
+}
+
+function attachVoiceAudio(peerId, stream) {
+  let audio = $('voice-' + peerId);
   if (!audio) {
     audio = document.createElement('audio');
-    audio.id = 'audio-' + peerId;
+    audio.id = 'voice-' + peerId;
     audio.autoplay = true;
     audioSink.appendChild(audio);
   }
   if (audio.srcObject !== stream) audio.srcObject = stream;
   audio.play().catch(() => {
-    // autoplay blocked — retry on the next user interaction instead of staying silent
-    const resume = () => {
-      audio.play().catch(() => {});
-      document.removeEventListener('pointerdown', resume);
-    };
+    const resume = () => { audio.play().catch(() => {}); document.removeEventListener('pointerdown', resume); };
     document.addEventListener('pointerdown', resume);
   });
+}
+
+function attachMovieAudio(peerId, track) {
+  const ctx = ensureAudioCtx();
+  // tear down any previous movie audio for this peer (renegotiation can deliver a new one)
+  detachMovieAudio(peerId);
+  // Chrome bug workaround: a MediaStreamAudioSourceNode only PULLS audio when the
+  // underlying MediaStream is ALSO sunk into an HTMLMediaElement somewhere. We attach
+  // it to a hidden, muted <audio> so Chrome wires up the decoder, then we tap the
+  // signal via Web Audio to apply gain.
+  const ms = new MediaStream([track]);
+  const kicker = document.createElement('audio');
+  kicker.id = 'movie-kick-' + peerId;
+  kicker.srcObject = ms;
+  kicker.autoplay = true;
+  kicker.muted = true; // we'll output via Web Audio instead
+  audioSink.appendChild(kicker);
+  kicker.play().catch(() => {});
+  const source = ctx.createMediaStreamSource(ms);
+  const gain = ctx.createGain();
+  gain.gain.value = 1.0;
+  source.connect(gain).connect(movieGain);
+  movieNodes.set(peerId, { source, gain, track, kickerAudio: kicker });
+}
+
+function detachMovieAudio(peerId, track) {
+  const node = movieNodes.get(peerId);
+  if (!node) return;
+  if (track && node.track !== track) return; // stale onended for a replaced track
+  try { node.source.disconnect(); } catch (_) {}
+  try { node.gain.disconnect(); } catch (_) {}
+  if (node.kickerAudio) { node.kickerAudio.srcObject = null; node.kickerAudio.remove(); }
+  movieNodes.delete(peerId);
+}
+
+function setMovieVolume(v) {
+  movieVolume = Math.max(0, Math.min(3, v));
+  if (movieGain) movieGain.gain.value = movieVolume;
+}
+
+// ---------- Movie volume slider ----------
+{
+  const slider = $('movieVol');
+  const pct = $('volPct');
+  if (slider) {
+    slider.addEventListener('input', () => {
+      const v = Number(slider.value) / 100;
+      setMovieVolume(v);
+      pct.textContent = slider.value + '%';
+    });
+  }
 }
 
 // ---------- Mic ----------
