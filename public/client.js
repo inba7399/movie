@@ -296,8 +296,8 @@ async function handleSignal(from, data) {
   // The presenter is telling us which MediaStream id carries their movie audio
   // (so we know which incoming audio track to route through the boosted gain).
   if (data && data.movieStreamId !== undefined) {
-    const st = peers.get(from);
-    if (st) st.movieStreamId = data.movieStreamId || null;
+    const st = peers.get(from) || createPeer(from, 'Guest'); // may race ahead of peer-joined
+    st.movieStreamId = data.movieStreamId || null;
     return;
   }
 
@@ -637,15 +637,31 @@ function updateHud(inbound, prev) {
 async function monitorPresenter() {
   if (!sharing || !screenStream) { cpuStrikes = 0; cpuClean = 0; return; }
   let cpuLimited = false;
+  let out = null; // sample one viewer's outbound video stats for the HUD
   for (const [, state] of peers) {
     let report;
     try { report = await state.pc.getStats(); } catch (_) { continue; }
     report.forEach((s) => {
-      if (s.type === 'outbound-rtp' && s.kind === 'video' && s.qualityLimitationReason === 'cpu') {
-        cpuLimited = true;
+      if (s.type === 'outbound-rtp' && s.kind === 'video') {
+        if (!out || (s.framesPerSecond || 0) > (out.framesPerSecond || 0)) out = s;
+        if (s.qualityLimitationReason === 'cpu') cpuLimited = true;
       }
     });
-    if (cpuLimited) break;
+  }
+
+  // Presenter HUD (shown while previewing your own share): what the capture actually
+  // produces vs what reaches viewers — makes "why is it 30fps?" answerable at a glance.
+  // If capture fps ≈ content fps (e.g. a 24/30fps movie), that IS the stream's ceiling.
+  if (stagePeerId === 'self' && statsHud) {
+    const t = screenStream.getVideoTracks()[0];
+    const cap = (t && t.getSettings && t.getSettings()) || {};
+    const capStr = `capture ${cap.height || '?'}p ${Math.round(cap.frameRate || 0)}fps`;
+    const sendStr = out
+      ? ` → send ${out.frameHeight || '?'}p ${Math.round(out.framesPerSecond || 0)}fps` +
+        (out.qualityLimitationReason && out.qualityLimitationReason !== 'none'
+          ? ` · limited by ${out.qualityLimitationReason}` : '')
+      : ' · no viewers yet';
+    statsHud.textContent = capStr + sendStr;
   }
   if (cpuLimited) {
     cpuClean = 0;
@@ -746,7 +762,7 @@ function renderStage() {
     const watchingRemote = peerId !== 'self';
     const showQuality = watchingRemote || sharing;
     qualitySelect.classList.toggle('hidden', !showQuality);
-    statsHud.classList.toggle('hidden', !watchingRemote);
+    statsHud.classList.toggle('hidden', !(watchingRemote || (peerId === 'self' && sharing)));
     if (watchingRemote) {
       qualitySelect.title = 'Quality you receive';
       // Only when the staged peer CHANGES — re-requesting on every render would wipe
@@ -790,15 +806,25 @@ qualitySelect.addEventListener('change', () => {
 // Two parallel pipelines:
 //   VOICE  → <audio> element (one per peer, holds that peer's mic). Default volume 1.0,
 //            echo cancellation already applied at the mic source.
-//   MOVIE  → Web Audio graph: MediaStreamAudioSourceNode → per-peer GainNode →
-//            master movieGain → destination. We can boost above 1.0 (HTMLMediaElement.volume
-//            cannot — that's why the movie sounded quiet next to the mic).
+//   MOVIE  → an <audio> element (so sound ALWAYS plays, even where Web Audio can't run)
+//            plus, where available, a Web Audio tap: MediaStreamAudioSourceNode →
+//            per-peer GainNode → master movieGain → destination. The Web Audio path can
+//            boost above 1.0 (HTMLMediaElement.volume cannot — that's why the movie
+//            sounded quiet next to the mic). While the AudioContext is suspended
+//            (mobile autoplay policy) the element plays UNMUTED at 100% as a fallback;
+//            the moment the context runs, the element is muted and the boosted path
+//            takes over. The element must STAY attached either way — Chrome won't pull
+//            audio into Web Audio unless the stream also has a media-element sink.
 // Identifying which incoming audio track is which: the presenter signals its
 // screenStream.id ahead of time, and ontrack matches on the receiver side.
+// iOS: Web Audio over remote WebRTC streams is unreliable and element volume is
+// read-only anyway — use the plain element at 100% and skip the boost.
+const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
+  || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 let audioCtx = null;
 let movieGain = null;
 let movieVolume = 1.6; // default boost — Discord-style "louder than 100%"
-const movieNodes = new Map(); // peerId -> { source, gain, track, kickerAudio }
+const movieNodes = new Map(); // peerId -> { track, el, source, gain }
 
 function ensureAudioCtx() {
   if (audioCtx) return audioCtx;
@@ -806,12 +832,46 @@ function ensureAudioCtx() {
   movieGain = audioCtx.createGain();
   movieGain.gain.value = movieVolume;
   movieGain.connect(audioCtx.destination);
-  // Autoplay: an AudioContext created before user interaction starts SUSPENDED. Kick
-  // it on the first click — and try once now in case the click already happened.
+  audioCtx.onstatechange = syncMovieOutputs;
+  // An AudioContext created outside a user gesture starts SUSPENDED. Try to resume
+  // (works if the page was already interacted with); keep retrying on taps; if it's
+  // still suspended shortly after, surface a visible prompt so one tap fixes it.
   const resume = () => { audioCtx.resume().catch(() => {}); };
   resume();
-  document.addEventListener('pointerdown', resume, { once: false });
+  document.addEventListener('pointerdown', resume);
+  setTimeout(() => { if (audioCtx.state !== 'running') showUnmutePrompt(); }, 600);
   return audioCtx;
+}
+
+// Mute the fallback elements while the boosted Web Audio path is live; unmute them
+// (capped at 100%) whenever it isn't.
+function syncMovieOutputs() {
+  const boosted = !!audioCtx && audioCtx.state === 'running';
+  for (const [, n] of movieNodes) {
+    if (!n.source) { n.el.muted = false; continue; } // plain-element path (iOS)
+    n.el.muted = boosted;
+    if (!boosted) { try { n.el.volume = Math.min(1, movieVolume); } catch (_) {} }
+  }
+}
+
+function showUnmutePrompt() {
+  const btn = $('unmuteBtn');
+  if (btn) btn.classList.remove('hidden');
+}
+$('unmuteBtn').addEventListener('click', () => {
+  $('unmuteBtn').classList.add('hidden');
+  if (audioCtx) audioCtx.resume().catch(() => {});
+  for (const a of audioSink.querySelectorAll('audio')) a.play().catch(() => {});
+  syncMovieOutputs();
+});
+
+// play() that surfaces a visible prompt instead of failing silently (mobile autoplay)
+function safePlay(el) {
+  el.play().catch(() => {
+    showUnmutePrompt();
+    const retry = () => { el.play().catch(() => {}); document.removeEventListener('pointerdown', retry); };
+    document.addEventListener('pointerdown', retry);
+  });
 }
 
 function attachVoiceAudio(peerId, stream) {
@@ -823,48 +883,49 @@ function attachVoiceAudio(peerId, stream) {
     audioSink.appendChild(audio);
   }
   if (audio.srcObject !== stream) audio.srcObject = stream;
-  audio.play().catch(() => {
-    const resume = () => { audio.play().catch(() => {}); document.removeEventListener('pointerdown', resume); };
-    document.addEventListener('pointerdown', resume);
-  });
+  safePlay(audio);
 }
 
 function attachMovieAudio(peerId, track) {
-  const ctx = ensureAudioCtx();
   // tear down any previous movie audio for this peer (renegotiation can deliver a new one)
   detachMovieAudio(peerId);
-  // Chrome bug workaround: a MediaStreamAudioSourceNode only PULLS audio when the
-  // underlying MediaStream is ALSO sunk into an HTMLMediaElement somewhere. We attach
-  // it to a hidden, muted <audio> so Chrome wires up the decoder, then we tap the
-  // signal via Web Audio to apply gain.
   const ms = new MediaStream([track]);
-  const kicker = document.createElement('audio');
-  kicker.id = 'movie-kick-' + peerId;
-  kicker.srcObject = ms;
-  kicker.autoplay = true;
-  kicker.muted = true; // we'll output via Web Audio instead
-  audioSink.appendChild(kicker);
-  kicker.play().catch(() => {});
-  const source = ctx.createMediaStreamSource(ms);
-  const gain = ctx.createGain();
-  gain.gain.value = 1.0;
-  source.connect(gain).connect(movieGain);
-  movieNodes.set(peerId, { source, gain, track, kickerAudio: kicker });
+  const el = document.createElement('audio');
+  el.id = 'movie-' + peerId;
+  el.srcObject = ms;
+  el.autoplay = true;
+  audioSink.appendChild(el);
+  const node = { track, el, source: null, gain: null };
+  movieNodes.set(peerId, node);
+
+  if (!IS_IOS) {
+    try {
+      const ctx = ensureAudioCtx();
+      node.source = ctx.createMediaStreamSource(ms);
+      node.gain = ctx.createGain();
+      node.gain.gain.value = 1.0;
+      node.source.connect(node.gain).connect(movieGain);
+    } catch (_) { /* Web Audio unavailable — plain element carries the sound */ }
+  }
+  syncMovieOutputs();
+  safePlay(el);
 }
 
 function detachMovieAudio(peerId, track) {
   const node = movieNodes.get(peerId);
   if (!node) return;
   if (track && node.track !== track) return; // stale onended for a replaced track
-  try { node.source.disconnect(); } catch (_) {}
-  try { node.gain.disconnect(); } catch (_) {}
-  if (node.kickerAudio) { node.kickerAudio.srcObject = null; node.kickerAudio.remove(); }
+  try { node.source && node.source.disconnect(); } catch (_) {}
+  try { node.gain && node.gain.disconnect(); } catch (_) {}
+  node.el.srcObject = null;
+  node.el.remove();
   movieNodes.delete(peerId);
 }
 
 function setMovieVolume(v) {
   movieVolume = Math.max(0, Math.min(3, v));
   if (movieGain) movieGain.gain.value = movieVolume;
+  syncMovieOutputs(); // fallback elements track the slider too (capped at 100%)
 }
 
 // ---------- Movie volume slider ----------
