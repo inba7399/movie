@@ -28,6 +28,9 @@ let micStream = null;
 let screenStream = null;
 let sharing = false;
 let micEnabled = true;
+// EC/NS/AGC on for voice — without echo cancellation the movie playing on your
+// speakers would be picked up by your mic and sent back to everyone.
+const MIC_CONSTRAINTS = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
 
 // Viewer-selectable quality. Each viewer has its OWN connection to the presenter, so
 // the presenter can encode a different quality per viewer — true per-viewer quality with
@@ -107,10 +110,7 @@ async function join() {
   // Echo cancellation/noise suppression on for voice.
   const [, mic] = await Promise.all([
     loadConfig(),
-    navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      video: false,
-    }).catch(() => null),
+    navigator.mediaDevices.getUserMedia({ audio: MIC_CONSTRAINTS, video: false }).catch(() => null),
   ]);
   micStream = mic || new MediaStream(); // no mic? still let them watch + chat
   if (!mic) systemMsg('No microphone detected — you can still watch and chat.');
@@ -171,6 +171,18 @@ socket.on('connect', () => {
 });
 
 // ---------- Peer connections ----------
+// Voice must stay clear even while a movie saturates the same link.
+function prioritizeVoice(sender) {
+  if (!sender) return;
+  try {
+    const p = sender.getParameters();
+    if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+    p.encodings[0].priority = 'high';
+    p.encodings[0].networkPriority = 'high';
+    sender.setParameters(p).catch(() => {});
+  } catch (_) {}
+}
+
 function createPeer(peerId, name) {
   const known = peers.get(peerId);
   if (known) {
@@ -186,25 +198,19 @@ function createPeer(peerId, name) {
   const state = { pc, name, polite, makingOffer: false, ignoreOffer: false, audioStream: new MediaStream(), wantQuality: 'auto' };
   peers.set(peerId, state);
 
-  // Always publish mic. If we're already sharing, publish the screen too.
-  for (const track of micStream.getTracks()) pc.addTrack(track, micStream);
-  // Voice must stay clear even while a movie saturates the same link.
-  for (const sender of pc.getSenders()) {
-    if (!sender.track || sender.track.kind !== 'audio') continue;
-    try {
-      const p = sender.getParameters();
-      if (!p.encodings || !p.encodings.length) p.encodings = [{}];
-      p.encodings[0].priority = 'high';
-      p.encodings[0].networkPriority = 'high';
-      sender.setParameters(p).catch(() => {});
-    } catch (_) {}
-  }
-  // No mic → no tracks → negotiation never starts and ICE/DTLS would only be set up
-  // when someone shares (adding seconds to their first frame). A recvonly transceiver
-  // warms the connection up right away.
-  if (micStream.getTracks().length === 0) {
-    try { pc.addTransceiver('audio', { direction: 'recvonly' }); } catch (_) {}
-  }
+  // One sendrecv audio transceiver per peer carries the mic both ways. Created even
+  // when there's no live mic track right now (muted/denied): it still starts
+  // negotiation immediately (warm ICE/DTLS — otherwise the first share would pay
+  // that setup cost), and unmuting later is just replaceTrack() on it — no
+  // renegotiation. The mic track comes and goes because mute fully RELEASES the
+  // device (see toggleMic).
+  const micTrack = micStream.getAudioTracks()[0] || null;
+  try {
+    state.micTx = micTrack
+      ? pc.addTransceiver(micTrack, { direction: 'sendrecv', streams: [micStream] })
+      : pc.addTransceiver('audio', { direction: 'sendrecv' });
+    prioritizeVoice(state.micTx.sender);
+  } catch (_) {}
   if (sharing && screenStream) {
     for (const track of screenStream.getTracks()) pc.addTrack(track, screenStream);
     preferVideoCodec(pc); // codec choice depends on Sharp/Smooth mode
@@ -963,12 +969,45 @@ function setMovieVolume(v) {
 
 // ---------- Mic ----------
 $('micBtn').addEventListener('click', toggleMic);
-function toggleMic() {
-  micEnabled = !micEnabled;
-  for (const t of micStream.getAudioTracks()) t.enabled = micEnabled;
-  socket.emit('presence', { muted: !micEnabled });
-  updateMicBtn();
-  updatePresence(selfId, undefined, !micEnabled);
+// Mute RELEASES the mic (stop + detach); unmute re-acquires it and swaps the new
+// track in with replaceTrack (no renegotiation). Merely flipping track.enabled
+// keeps the capture session open, and an OPEN MIC SESSION is what holds phones in
+// "communication/call" audio mode and Bluetooth headsets on the low-quality HFP
+// profile — both make the movie sound muffled on the listener's device even while
+// they're muted. Releasing the device lets playback return to full media quality.
+let micBusy = false;
+async function toggleMic() {
+  if (micBusy) return; // re-acquire still in flight — ignore the double click
+  micBusy = true;
+  try {
+    if (micEnabled) {
+      micEnabled = false;
+      for (const t of micStream.getAudioTracks()) t.stop();
+      micStream = new MediaStream();
+      for (const [, s] of peers) {
+        if (s.micTx) s.micTx.sender.replaceTrack(null).catch(() => {});
+      }
+    } else {
+      const mic = await navigator.mediaDevices
+        .getUserMedia({ audio: MIC_CONSTRAINTS, video: false })
+        .catch(() => null);
+      if (!mic) { systemMsg('Could not access the microphone.'); return; }
+      micEnabled = true;
+      micStream = mic;
+      const track = micStream.getAudioTracks()[0];
+      for (const [, s] of peers) {
+        if (s.micTx) {
+          s.micTx.sender.replaceTrack(track).catch(() => {});
+          prioritizeVoice(s.micTx.sender);
+        }
+      }
+    }
+  } finally {
+    micBusy = false;
+    socket.emit('presence', { muted: !micEnabled });
+    updateMicBtn();
+    updatePresence(selfId, undefined, !micEnabled);
+  }
 }
 function updateMicBtn() {
   const btn = $('micBtn');
@@ -1018,7 +1057,9 @@ function updatePresence(id, isSharing, isMuted) {
   if (typeof isMuted === 'boolean') cur.muted = isMuted;
   badges.dataset.sharing = cur.sharing ? '1' : '0';
   badges.dataset.muted = cur.muted ? '1' : '0';
-  badges.textContent = `${cur.sharing ? '🖥️' : ''}${cur.muted ? '🔇' : ''}`;
+  badges.innerHTML =
+    (cur.sharing ? '<span class="badge live">Live</span>' : '') +
+    (cur.muted ? '<span class="badge off">Muted</span>' : '');
 }
 
 // ---------- Chat ----------

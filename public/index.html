@@ -3,61 +3,93 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <meta name="theme-color" content="#07080d" />
+  <meta name="theme-color" content="#05060a" />
   <title>streem — watch together</title>
   <link rel="stylesheet" href="style.css" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
 </head>
 <body>
+  <!-- ambient aurora background -->
+  <div class="aurora" aria-hidden="true">
+    <div class="blob b1"></div>
+    <div class="blob b2"></div>
+    <div class="blob b3"></div>
+  </div>
+
   <!-- Join screen -->
   <div id="join" class="join">
     <div class="join-card">
-      <div class="logo">🎬 streem</div>
-      <p class="tagline">Voice chat · 60fps screen share · text chat. Just like movie night.</p>
-      <label>Your name</label>
+      <div class="logo">streem<span class="logo-dot"></span></div>
+      <p class="tagline">Watch together. Talk together. Perfectly in sync.</p>
+      <div class="feature-pills">
+        <span>Peer-to-peer</span>
+        <span>Up&nbsp;to&nbsp;4K</span>
+        <span>Voice&nbsp;+&nbsp;chat</span>
+      </div>
+      <label for="nameInput">Your name</label>
       <input id="nameInput" maxlength="32" placeholder="e.g. Alex" autocomplete="off" />
-      <label>Room code</label>
-      <input id="roomInput" maxlength="64" placeholder="e.g. movie-night" autocomplete="off" />
-      <button id="joinBtn">Join room</button>
-      <p class="hint">Share the room code with friends so they land in the same room. Use a mic + headphones for the best audio.</p>
+      <label for="roomInput">Room code</label>
+      <input id="roomInput" maxlength="64" placeholder="e.g. friday-hangout" autocomplete="off" />
+      <button id="joinBtn">
+        Join room
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+      </button>
+      <p class="hint">Share the room code with friends — everyone with the code lands in the same room. Headphones make the audio shine.</p>
     </div>
   </div>
 
   <!-- Main app -->
   <div id="app" class="app hidden">
     <!-- Left: participants -->
-    <aside class="sidebar">
+    <aside class="sidebar panel">
       <div class="room-head">
         <div class="room-name" id="roomLabel">room</div>
         <div class="room-sub">In this room</div>
       </div>
       <ul id="participants" class="participants"></ul>
-      <div class="sidebar-foot">streem · p2p webrtc</div>
+      <div class="sidebar-foot">
+        <span class="foot-dot"></span> streem · p2p webrtc
+      </div>
     </aside>
 
     <!-- Center: the screen-share stage -->
     <main class="stage-wrap">
-      <div id="stage" class="stage">
+      <div id="stage" class="stage panel">
         <video id="stageVideo" autoplay playsinline muted class="hidden"></video>
         <div id="stagePlaceholder" class="stage-placeholder">
-          <div class="big">📺</div>
-          <div>No one is sharing yet.</div>
-          <div class="muted">Click <b>Share screen</b> to start the movie.</div>
+          <div class="ph-ring">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="3"/><polygon points="10 7.5 15 10 10 12.5 10 7.5" fill="currentColor" stroke="none"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+          </div>
+          <h2>Nothing is playing yet</h2>
+          <p>Hit <b>Share screen</b> below to light up the stage.</p>
         </div>
         <div id="presenterTag" class="presenter-tag hidden"></div>
         <div id="statsHud" class="stats-hud hidden"></div>
-        <button id="unmuteBtn" class="unmute hidden">🔊 Tap for audio</button>
+        <button id="unmuteBtn" class="unmute hidden">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" stroke="none"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9.4 9.4 0 0 1 0 13"/></svg>
+          Tap for audio
+        </button>
       </div>
 
       <!-- Control bar -->
       <div class="controls">
-        <button id="micBtn" class="ctl" title="Mute / unmute mic">🎤<span>Mute</span></button>
-        <button id="shareBtn" class="ctl primary" title="Share your screen">🖥️<span>Share screen</span></button>
-        <button id="optBtn" class="ctl hidden" title="Optimize for: Smooth (video) or Sharp (text/apps)">✨<span>Smooth</span></button>
+        <button id="micBtn" class="ctl" title="Mute / unmute mic">
+          <svg class="ic ic-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1"/><line x1="12" y1="18" x2="12" y2="22"/></svg>
+          <svg class="ic ic-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 9.5V11a3 3 0 0 0 5.1 2.1"/><path d="M15 9.3V5a3 3 0 0 0-5.9-.7"/><path d="M5 10v1a7 7 0 0 0 11.6 5.2"/><path d="M19 10v1a7 7 0 0 1-.4 2.3"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="3" y1="3" x2="21" y2="21"/></svg>
+          <span>Mute</span>
+        </button>
+        <button id="shareBtn" class="ctl primary" title="Share your screen">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="3"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+          <span>Share screen</span>
+        </button>
+        <button id="optBtn" class="ctl hidden" title="Optimize for: Smooth (video) or Sharp (text/apps)">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3L12 3z"/></svg>
+          <span>Smooth</span>
+        </button>
         <select id="qualitySelect" class="ctl quality hidden" title="Stream quality you receive">
-          <option value="auto">⚙️ Auto</option>
+          <option value="auto">Auto</option>
           <option value="2160">4K</option>
           <option value="1440">1440p</option>
           <option value="1080">1080p</option>
@@ -65,22 +97,30 @@
           <option value="480">480p</option>
         </select>
         <label id="volWrap" class="ctl vol" title="Movie volume (boosts the shared stream's audio above 100%)">
-          🔊
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" stroke="none"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/></svg>
           <input id="movieVol" type="range" min="0" max="300" step="5" value="160" />
           <span id="volPct">160%</span>
         </label>
-        <button id="fsBtn" class="ctl" title="Fullscreen the stage">⛶<span>Fullscreen</span></button>
-        <button id="leaveBtn" class="ctl danger" title="Leave the room">⏏<span>Leave</span></button>
+        <button id="fsBtn" class="ctl" title="Fullscreen the stage">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+          <span>Fullscreen</span>
+        </button>
+        <button id="leaveBtn" class="ctl danger" title="Leave the room">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          <span>Leave</span>
+        </button>
       </div>
     </main>
 
     <!-- Right: text chat -->
-    <section class="chat">
+    <section class="chat panel">
       <div class="chat-head">Chat</div>
       <div id="messages" class="messages"></div>
       <form id="chatForm" class="chat-form">
         <input id="chatInput" placeholder="Message…" maxlength="2000" autocomplete="off" />
-        <button type="submit">Send</button>
+        <button type="submit" aria-label="Send">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+        </button>
       </form>
     </section>
   </div>
