@@ -41,11 +41,11 @@ let micEnabled = true;
 // asking for 120 unlocks the ceiling; below that the browser auto-paces.
 const QUALITY_PRESETS = {
   auto:   { label: 'Auto',  maxBitrate: null,       height: null, maxFramerate: 120 },
-  '2160': { label: '4K',    maxBitrate: 28_000_000, height: 2160, maxFramerate: 60  },
-  '1440': { label: '1440p', maxBitrate: 16_000_000, height: 1440, maxFramerate: 120 },
-  '1080': { label: '1080p', maxBitrate: 10_000_000, height: 1080, maxFramerate: 120 },
-  '720':  { label: '720p',  maxBitrate:  5_500_000, height: 720,  maxFramerate: 120 },
-  '480':  { label: '480p',  maxBitrate:  1_500_000, height: 480,  maxFramerate: 60  },
+  '2160': { label: '4K',    maxBitrate: 30_000_000, height: 2160, maxFramerate: 60  },
+  '1440': { label: '1440p', maxBitrate: 18_000_000, height: 1440, maxFramerate: 120 },
+  '1080': { label: '1080p', maxBitrate: 12_000_000, height: 1080, maxFramerate: 120 },
+  '720':  { label: '720p',  maxBitrate:  6_000_000, height: 720,  maxFramerate: 120 },
+  '480':  { label: '480p',  maxBitrate:  2_000_000, height: 480,  maxFramerate: 60  },
 };
 // In a mesh every viewer gets their OWN encode — N viewers means N uploads at once.
 // Split a total uplink budget across them so 4 friends don't ask a home connection
@@ -465,7 +465,10 @@ function applyQualityRequest(peerId, qualityKey) {
   const state = peers.get(peerId);
   if (!state) return;
   state.wantQuality = QUALITY_PRESETS[qualityKey] ? qualityKey : 'auto';
-  tuneVideoSender(state);
+  // Their request may change the needed capture size (e.g. first viewer to ask for
+  // 1440p) — recapture, then rescale EVERY sender against the new capture height.
+  recaptureScreen();
+  for (const [, s] of peers) tuneVideoSender(s);
 }
 
 // We're the presenter; set the ceiling sent to ALL viewers, re-capture at that resolution
@@ -485,7 +488,17 @@ function setBroadcastQuality(qualityKey) {
 // reports CPU overload we ratchet capture back down (cpuRelief recovers on its own).
 function captureConstraints() {
   const capHeight = { '2160': 2160, '1440': 1440, '1080': 1080, '720': 720, '480': 480 };
-  let height = capHeight[broadcastQuality] || 1080;
+  // Height: an explicit broadcast pick wins; on Auto, capture enough for the most
+  // demanding viewer request (floor 1080) — scaling never UPSCALES, so without this a
+  // viewer choosing 1440p/4K would silently keep getting 1080p.
+  let height = capHeight[broadcastQuality];
+  if (!height) {
+    height = 1080;
+    for (const [, s] of peers) {
+      const h = (QUALITY_PRESETS[s.wantQuality] || {}).height;
+      if (h) height = Math.max(height, h);
+    }
+  }
   let fps = contentMode === 'motion' ? 120 : 30;
   if (cpuRelief >= 1) fps = Math.min(fps, 60);
   if (cpuRelief >= 2) { fps = Math.min(fps, 30); height = Math.min(height, 720); }
@@ -661,7 +674,12 @@ async function monitorPresenter() {
         (out.qualityLimitationReason && out.qualityLimitationReason !== 'none'
           ? ` · limited by ${out.qualityLimitationReason}` : '')
       : ' · no viewers yet';
-    statsHud.textContent = capStr + sendStr;
+    // Window/tab capture is throttled to ~30fps on many systems; full-screen capture
+    // follows the monitor's refresh rate — the single biggest fps unlock there is.
+    const tip = (contentMode === 'motion' && (cap.frameRate || 0) < 45
+      && cap.displaySurface && cap.displaySurface !== 'monitor')
+      ? ' · tip: share your ENTIRE SCREEN for higher fps' : '';
+    statsHud.textContent = capStr + sendStr + tip;
   }
   if (cpuLimited) {
     cpuClean = 0;
@@ -693,7 +711,7 @@ async function monitorPresenter() {
 function tuneSdp(description) {
   try {
     let sdp = description.sdp;
-    const opusWant = { stereo: '1', 'sprop-stereo': '1', maxaveragebitrate: '256000', useinbandfec: '1' };
+    const opusWant = { stereo: '1', 'sprop-stereo': '1', maxaveragebitrate: '320000', useinbandfec: '1' };
     const opusFmtp = Object.entries(opusWant).map(([k, v]) => `${k}=${v}`).join(';');
     const opusIds = [...sdp.matchAll(/a=rtpmap:(\d+) opus\/48000\/2/gi)].map((m) => m[1]);
     for (const id of new Set(opusIds)) {
@@ -828,7 +846,9 @@ const movieNodes = new Map(); // peerId -> { track, el, source, gain }
 
 function ensureAudioCtx() {
   if (audioCtx) return audioCtx;
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  // 'playback' = slightly bigger output buffer → glitch-free movie audio on weak
+  // devices (voice doesn't go through this context, so calls stay snappy)
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'playback' });
   movieGain = audioCtx.createGain();
   movieGain.gain.value = movieVolume;
   movieGain.connect(audioCtx.destination);
