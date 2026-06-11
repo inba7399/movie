@@ -56,6 +56,13 @@ const QUALITY_PRESETS = {
 const UPLINK_BUDGET = 20_000_000;
 let myQualityChoice = 'auto';  // what I (as a viewer) last asked the presenter for
 let broadcastQuality = 'auto'; // ceiling I (as the presenter) send to all viewers
+// Frame-rate picks work like quality picks: a viewer asks the presenter for a rate on
+// their own connection; the presenter's pick sets the capture rate and a ceiling for
+// everyone. An EXPLICIT fps replaces the quality preset's default framerate cap
+// ("4K + 120" means 4K at 120, not the preset's 60).
+const FPS_PRESETS = { auto: null, '24': 24, '30': 30, '60': 60, '120': 120 };
+let myFpsChoice = 'auto';    // what I (as a viewer) last asked the presenter for
+let broadcastFps = 'auto';   // capture rate + ceiling I (as the presenter) apply to all viewers
 let contentMode = 'motion';    // 'motion' = fluid 60fps video (default — it's a movie app), 'detail' = sharp text/apps
 let stagePeerId = null;        // whose share is on the stage ('self' = my own preview)
 
@@ -72,6 +79,7 @@ const stagePlaceholder = $('stagePlaceholder');
 const presenterTag = $('presenterTag');
 const audioSink = $('audioSink');
 const qualitySelect = $('qualitySelect');
+const fpsSelect = $('fpsSelect');
 const statsHud = $('statsHud');
 
 const AVATAR_COLORS = ['#5865f2', '#3ba55d', '#faa61a', '#ed4245', '#9b59b6', '#1abc9c', '#e91e63', '#00b0f4'];
@@ -195,7 +203,7 @@ function createPeer(peerId, name) {
   const polite = selfId < peerId;
   // iceCandidatePoolSize pre-gathers candidates so the first frame lands sooner
   const pc = new RTCPeerConnection({ iceServers, bundlePolicy: 'max-bundle', iceCandidatePoolSize: 4 });
-  const state = { pc, name, polite, makingOffer: false, ignoreOffer: false, audioStream: new MediaStream(), wantQuality: 'auto' };
+  const state = { pc, name, polite, makingOffer: false, ignoreOffer: false, audioStream: new MediaStream(), wantQuality: 'auto', wantFps: 'auto' };
   peers.set(peerId, state);
 
   // One sendrecv audio transceiver per peer carries the mic both ways. Created even
@@ -298,7 +306,9 @@ function createPeer(peerId, name) {
 
 async function handleSignal(from, data) {
   // A viewer is asking us (the presenter) for a quality level on their connection.
-  if (data && data.quality) { applyQualityRequest(from, data.quality); return; }
+  if (data && data.quality) { applyQualityRequest(from, data.quality, !!data.abr); return; }
+  // A viewer is asking us (the presenter) for a frame rate on their connection.
+  if (data && data.fps) { applyFpsRequest(from, data.fps); return; }
   // The presenter is telling us which MediaStream id carries their movie audio
   // (so we know which incoming audio track to route through the boosted gain).
   if (data && data.movieStreamId !== undefined) {
@@ -417,7 +427,7 @@ function stopShare() {
   }
   for (const t of tracks) t.stop();
   screenStream = null;
-  cpuRelief = 0; cpuStrikes = 0; cpuClean = 0; // next share starts clean, not pre-degraded
+  cpuRelief = 0; cpuStrikes = 0; cpuClean = 0; cpuWarned = false; // next share starts clean, not pre-degraded
 
   clearPresenter('self');
   socket.emit('presence', { sharing: false });
@@ -448,50 +458,83 @@ function applyEncoding(sender, preset) {
 
 // Combine a viewer's request with my broadcast ceiling — the lower wins for each
 // dimension (a viewer can drop below what I broadcast, never rise above it). null = source.
-function effectivePreset(requestKey) {
-  const req = QUALITY_PRESETS[requestKey] || QUALITY_PRESETS.auto;
+function effectivePreset(state) {
+  const req = QUALITY_PRESETS[state.wantQuality] || QUALITY_PRESETS.auto;
   const ceil = QUALITY_PRESETS[broadcastQuality] || QUALITY_PRESETS.auto;
   const lower = (a, b) => (a == null ? b : b == null ? a : Math.min(a, b));
+  // An explicit fps pick (the viewer's, the presenter's, or the lower of both)
+  // replaces the preset-derived framerate cap entirely.
+  const reqFps = FPS_PRESETS[state.wantFps] || null;
+  const ceilFps = FPS_PRESETS[broadcastFps] || null;
+  const explicitFps = reqFps && ceilFps ? Math.min(reqFps, ceilFps) : reqFps || ceilFps;
   return {
     maxBitrate: lower(req.maxBitrate, ceil.maxBitrate),
     height: lower(req.height, ceil.height),
-    maxFramerate: Math.min(req.maxFramerate || 120, ceil.maxFramerate || 120),
+    maxFramerate: explicitFps || Math.min(req.maxFramerate || 120, ceil.maxFramerate || 120),
   };
 }
 
 // (Re)tune one viewer's video sender from their request + my broadcast ceiling.
 function tuneVideoSender(state) {
   const sender = state.pc.getSenders().find((s) => s.track && s.track.kind === 'video');
-  applyEncoding(sender, effectivePreset(state.wantQuality || 'auto'));
+  applyEncoding(sender, effectivePreset(state));
 }
 
 // We're the presenter; viewer `peerId` asked for a level. Remember it and apply to just
 // their connection so the other viewers are unaffected.
-function applyQualityRequest(peerId, qualityKey) {
+function applyQualityRequest(peerId, qualityKey, abr = false) {
   const state = peers.get(peerId);
   if (!state) return;
   state.wantQuality = QUALITY_PRESETS[qualityKey] ? qualityKey : 'auto';
+  // ABR-driven requests are still "auto" — only a human pick may disable the CPU backoff
+  state.wantAbr = abr;
   // Their request may change the needed capture size (e.g. first viewer to ask for
   // 1440p) — recapture, then rescale EVERY sender against the new capture height.
-  recaptureScreen();
-  for (const [, s] of peers) tuneVideoSender(s);
+  recaptureScreen().then(() => { for (const [, s] of peers) tuneVideoSender(s); });
+}
+
+// We're the presenter; viewer `peerId` asked for a frame rate on their connection.
+function applyFpsRequest(peerId, fpsKey) {
+  const state = peers.get(peerId);
+  if (!state) return;
+  state.wantFps = fpsKey in FPS_PRESETS ? fpsKey : 'auto';
+  recaptureScreen().then(() => { for (const [, s] of peers) tuneVideoSender(s); });
 }
 
 // We're the presenter; set the ceiling sent to ALL viewers, re-capture at that resolution
 // (so we don't waste CPU on bigger frames), then re-tune each connection.
 function setBroadcastQuality(qualityKey) {
   broadcastQuality = QUALITY_PRESETS[qualityKey] ? qualityKey : 'auto';
-  recaptureScreen();
-  for (const [, state] of peers) tuneVideoSender(state);
+  recaptureScreen().then(() => { for (const [, state] of peers) tuneVideoSender(state); });
+}
+
+// We're the presenter; set capture frame rate + the fps ceiling for all viewers.
+function setBroadcastFps(fpsKey) {
+  broadcastFps = fpsKey in FPS_PRESETS ? fpsKey : 'auto';
+  recaptureScreen().then(() => { for (const [, state] of peers) tuneVideoSender(state); });
+}
+
+// True when a human explicitly picked a quality or fps — mine as the presenter, or any
+// viewer's request (ABR's auto-rungs don't count). Explicit picks are authoritative:
+// the CPU auto-backoff must not silently undo them (it warns instead — see
+// monitorPresenter), which is what made "4K" quietly turn into 720p30.
+function manualTuning() {
+  if (broadcastQuality !== 'auto' || FPS_PRESETS[broadcastFps]) return true;
+  for (const [, s] of peers) {
+    if (s.wantQuality !== 'auto' && !s.wantAbr) return true;
+    if (FPS_PRESETS[s.wantFps]) return true;
+  }
+  return false;
 }
 
 // Capture constraints sized to what we'll actually send: cap resolution to the chosen
 // broadcast quality (default 1080p — 4K only if explicitly picked).
-// Framerate target: 120fps in motion mode (user wants high-refresh-rate movie/game
-// content); 30fps in detail mode (text/apps don't update faster). The browser hands
-// back min(monitor refresh, content fps) — asking for 120 just unlocks the ceiling.
+// Framerate target: an explicit broadcast fps wins; otherwise 120fps in motion mode,
+// 30fps in detail mode (raised if a viewer explicitly asked for more). The browser
+// hands back min(monitor refresh, content fps) — asking high just unlocks the ceiling.
 // Over-capturing IS the main cause of stutter on one machine, so when the encoder
-// reports CPU overload we ratchet capture back down (cpuRelief recovers on its own).
+// reports CPU overload we ratchet capture back down (cpuRelief recovers on its own) —
+// but ONLY on full-auto: explicit quality/fps picks are never silently undone.
 function captureConstraints() {
   const capHeight = { '2160': 2160, '1440': 1440, '1080': 1080, '720': 720, '480': 480 };
   // Height: an explicit broadcast pick wins; on Auto, capture enough for the most
@@ -505,16 +548,28 @@ function captureConstraints() {
       if (h) height = Math.max(height, h);
     }
   }
-  let fps = contentMode === 'motion' ? 120 : 30;
-  if (cpuRelief >= 1) fps = Math.min(fps, 60);
-  if (cpuRelief >= 2) { fps = Math.min(fps, 30); height = Math.min(height, 720); }
+  let fps = FPS_PRESETS[broadcastFps] || (contentMode === 'motion' ? 120 : 30);
+  if (!FPS_PRESETS[broadcastFps]) {
+    for (const [, s] of peers) {
+      const f = FPS_PRESETS[s.wantFps];
+      if (f) fps = Math.max(fps, f);
+    }
+  }
+  if (!manualTuning()) {
+    if (cpuRelief >= 1) fps = Math.min(fps, 60);
+    if (cpuRelief >= 2) { fps = Math.min(fps, 30); height = Math.min(height, 720); }
+  }
   return { height: { ideal: height }, frameRate: { ideal: fps, max: fps } };
 }
 
-// Re-apply capture constraints to a live share (after a quality/mode change).
+// Re-apply capture constraints to a live share (after a quality/mode change). Returns a
+// promise so callers re-tune senders only AFTER the new capture size is live —
+// scaleResolutionDownBy must be computed against the new height, not the stale one.
 function recaptureScreen() {
-  if (!screenStream) return;
-  for (const t of screenStream.getVideoTracks()) t.applyConstraints(captureConstraints()).catch(() => {});
+  if (!screenStream) return Promise.resolve();
+  return Promise.all(
+    screenStream.getVideoTracks().map((t) => t.applyConstraints(captureConstraints()).catch(() => {}))
+  );
 }
 
 // Pick the video codec to match the content:
@@ -549,14 +604,15 @@ function preferVideoCodec(pc) {
 function setContentMode(mode) {
   contentMode = mode === 'motion' ? 'motion' : 'detail';
   if (screenStream) for (const t of screenStream.getVideoTracks()) t.contentHint = contentMode;
-  recaptureScreen();
-  for (const [, state] of peers) {
-    if (sharing && screenStream) {
-      preferVideoCodec(state.pc);
-      state.pc.onnegotiationneeded(); // codec change doesn't auto-fire negotiation
+  recaptureScreen().then(() => {
+    for (const [, state] of peers) {
+      if (sharing && screenStream) {
+        preferVideoCodec(state.pc);
+        state.pc.onnegotiationneeded(); // codec change doesn't auto-fire negotiation
+      }
+      tuneVideoSender(state);
     }
-    tuneVideoSender(state);
-  }
+  });
 }
 
 // ---------- Adaptive streaming (stats-driven, Twitch-style) ----------
@@ -570,9 +626,10 @@ let prevInbound = null;   // last inbound-rtp stats snapshot for delta math
 let healthyTicks = 0;
 let autoStep = 0;         // 0 = source quality; deeper = lower rung on the ladder
 const AUTO_LADDER = ['auto', '1080', '720', '480'];
-let cpuRelief = 0;        // 0 none · 1 cap 30fps · 2 also cap 720p
+let cpuRelief = 0;        // 0 none · 1 cap 60fps · 2 cap 30fps + 720p (full-auto only)
 let cpuStrikes = 0;
 let cpuClean = 0;
+let cpuWarned = false;    // one-shot "your CPU can't keep up" notice under manual tuning
 
 function setJitterTarget(receiver, ms) {
   try {
@@ -634,12 +691,12 @@ async function monitorViewer() {
     healthyTicks = 0;
     if (autoStep < AUTO_LADDER.length - 1) {
       autoStep++;
-      socket.emit('signal', { to: stagePeerId, data: { quality: AUTO_LADDER[autoStep] } });
+      socket.emit('signal', { to: stagePeerId, data: { quality: AUTO_LADDER[autoStep], abr: true } });
     }
   } else if (autoStep > 0 && ++healthyTicks >= 8) { // ~16s clean → try one rung up
     healthyTicks = 0;
     autoStep--;
-    socket.emit('signal', { to: stagePeerId, data: { quality: AUTO_LADDER[autoStep] } });
+    socket.emit('signal', { to: stagePeerId, data: { quality: AUTO_LADDER[autoStep], abr: true } });
   }
 }
 
@@ -687,20 +744,25 @@ async function monitorPresenter() {
       ? ' · tip: share your ENTIRE SCREEN for higher fps' : '';
     statsHud.textContent = capStr + sendStr + tip;
   }
-  if (cpuLimited) {
+  if (cpuLimited && manualTuning()) {
+    // A human picked this quality/fps — never silently undo it. Say it once instead.
+    cpuStrikes = 0;
+    if (!cpuWarned) {
+      cpuWarned = true;
+      systemMsg('Your machine is struggling to encode at the selected quality/fps — viewers may see stutter. Lower the quality or FPS setting if it lags.');
+    }
+  } else if (cpuLimited) {
     cpuClean = 0;
     if (++cpuStrikes >= 3 && cpuRelief < 2) { // ~6s of sustained overload
       cpuStrikes = 0;
       cpuRelief++;
-      recaptureScreen();
       // the capture size changed — recompute every sender's scaling against it
-      for (const [, s] of peers) tuneVideoSender(s);
+      recaptureScreen().then(() => { for (const [, s] of peers) tuneVideoSender(s); });
     }
   } else if (cpuRelief > 0 && ++cpuClean >= 15) { // ~30s clean → ease back up
     cpuClean = 0;
     cpuRelief--;
-    recaptureScreen();
-    for (const [, s] of peers) tuneVideoSender(s);
+    recaptureScreen().then(() => { for (const [, s] of peers) tuneVideoSender(s); });
   } else if (!cpuLimited) {
     cpuStrikes = 0;
   }
@@ -786,18 +848,23 @@ function renderStage() {
     const watchingRemote = peerId !== 'self';
     const showQuality = watchingRemote || sharing;
     qualitySelect.classList.toggle('hidden', !showQuality);
+    fpsSelect.classList.toggle('hidden', !showQuality);
     statsHud.classList.toggle('hidden', !(watchingRemote || (peerId === 'self' && sharing)));
     if (watchingRemote) {
       qualitySelect.title = 'Quality you receive';
+      fpsSelect.title = 'Frame rate you receive';
       // Only when the staged peer CHANGES — re-requesting on every render would wipe
       // the ABR ladder and yank the presenter back to full rate mid-congestion.
       if (stageChanged) {
         jbTarget = 60; // fresh stream, fresh low-latency baseline
         requestQuality(myQualityChoice);
+        requestFps(myFpsChoice);
       }
     } else if (showQuality) {
       qualitySelect.title = 'Broadcast quality — ceiling for all viewers';
       qualitySelect.value = broadcastQuality;
+      fpsSelect.title = 'Broadcast frame rate — capture rate & ceiling for all viewers';
+      fpsSelect.value = broadcastFps;
     }
   } else {
     stagePeerId = null;
@@ -806,6 +873,7 @@ function renderStage() {
     stagePlaceholder.classList.remove('hidden');
     presenterTag.classList.add('hidden');
     qualitySelect.classList.add('hidden');
+    fpsSelect.classList.add('hidden');
     statsHud.classList.add('hidden');
   }
 }
@@ -819,11 +887,24 @@ function requestQuality(qualityKey) {
     socket.emit('signal', { to: stagePeerId, data: { quality: qualityKey } });
   }
 }
-// While watching others the dropdown picks what you RECEIVE; while sharing it sets the
+// Viewer side: ask whoever's on the stage for a frame rate on our connection.
+function requestFps(fpsKey) {
+  myFpsChoice = fpsKey in FPS_PRESETS ? fpsKey : 'auto';
+  if (fpsSelect.value !== myFpsChoice) fpsSelect.value = myFpsChoice;
+  if (stagePeerId && stagePeerId !== 'self') {
+    socket.emit('signal', { to: stagePeerId, data: { fps: myFpsChoice } });
+  }
+}
+
+// While watching others the dropdowns pick what you RECEIVE; while sharing they set the
 // ceiling you BROADCAST to everyone.
 qualitySelect.addEventListener('change', () => {
   if (stagePeerId === 'self') setBroadcastQuality(qualitySelect.value);
   else requestQuality(qualitySelect.value);
+});
+fpsSelect.addEventListener('change', () => {
+  if (stagePeerId === 'self') setBroadcastFps(fpsSelect.value);
+  else requestFps(fpsSelect.value);
 });
 
 // ---------- Audio (remote voices + movie sound) ----------

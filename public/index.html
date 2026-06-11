@@ -96,6 +96,13 @@
           <option value="720">720p</option>
           <option value="480">480p</option>
         </select>
+        <select id="fpsSelect" class="ctl quality hidden" title="Frame rate">
+          <option value="auto">Auto fps</option>
+          <option value="24">24 fps</option>
+          <option value="30">30 fps</option>
+          <option value="60">60 fps</option>
+          <option value="120">120 fps</option>
+        </select>
         <label id="volWrap" class="ctl vol" title="Movie volume (boosts the shared stream's audio above 100%)">
           <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" stroke="none"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/></svg>
           <input id="movieVol" type="range" min="0" max="300" step="5" value="160" />
